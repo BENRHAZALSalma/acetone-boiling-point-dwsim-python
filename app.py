@@ -1,101 +1,200 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+from CoolProp.CoolProp import PropsSI
 
-# ============ DONNEES ============
-m_total = 38.0 / 3600            # kg/s
-frac_bas = 0.60
-m_bas = frac_bas * m_total       # kg/s
-T_in = 10 + 273.15               # K
-P_atm = 1.0
-Cp = 2.16                        # kJ/(kg.K)
 
-# ============ RESULTATS DWSIM ============
-T_DWSIM = 329.29                 # K  (courant 5, constant dans la sensibilité)
-Q_DWSIM = 3.88                   # kW
+# ============================================================
+# 1. DONNEES DU PROBLEME
+# ============================================================
 
-# ============ ANTOINE (acétone, P en bar, T en K) ============
-A, B, C = 4.42448, 1312.253, -32.445
+FLUID = "Acetone"
 
-def Psat(T):
-    return 10 ** (A - B / (T + C))          # bar
+# Alimentation
+m_total = 38.0          # kg/h
+T_in_C = 10.0           # °C
+P_in_atm = 1.0          # atm
 
-def T_eb(P_atm):
-    P_bar = np.asarray(P_atm) * 1.01325
-    return B / (A - np.log10(P_bar)) - C
+# Conversion
+ATM_TO_PA = 101325.0
 
-# ============ RESOLUTION ITERATIVE (dichotomie) avec affichage ============
-def solve_Teb(P_atm, Tmin=250.0, Tmax=400.0, tol=1e-6, verbose=True):
-    """Résout Psat(T) - P = 0 par dichotomie et affiche chaque itération."""
-    P_bar = P_atm * 1.01325
-    f = lambda T: Psat(T) - P_bar
-    fmin = f(Tmin)
-    if verbose:
-        print(f"Résolution de Psat(T) - {P_bar:.5f} = 0  (dichotomie, [{Tmin}, {Tmax}] K)")
-        print(f"{'Iter':>4} | {'T_min (K)':>11} | {'T_max (K)':>11} | "
-              f"{'T_mid (K)':>11} | {'f(T_mid) (bar)':>15} | {'Erreur (K)':>11}")
-        print("-" * 78)
-    n = 0
-    while (Tmax - Tmin) > tol:
-        n += 1
-        Tmid = (Tmin + Tmax) / 2
-        fmid = f(Tmid)
-        if verbose:
-            print(f"{n:4d} | {Tmin:11.5f} | {Tmax:11.5f} | "
-                  f"{Tmid:11.5f} | {fmid:15.3e} | {Tmax - Tmin:11.2e}")
-        if fmin * fmid <= 0:
-            Tmax = Tmid
-        else:
-            Tmin, fmin = Tmid, fmid
-    T = (Tmin + Tmax) / 2
-    if verbose:
-        print("-" * 78)
-        print(f"Convergence en {n} itérations : T_éb = {T:.4f} K")
-    return T, n
+T_in_K = T_in_C + 273.15
+P_in_Pa = P_in_atm * ATM_TO_PA
 
-# ============ 1) Calcul "théorique" (Antoine + valeurs constantes) ============
-Hvap_theo = 29.1 / 58.08 * 1000                  # kJ/kg
-print("\n" + "=" * 78)
-Teb_th, n_iter = solve_Teb(P_atm)
-print("=" * 78 + "\n")
-Q_th = m_bas * (Cp * (Teb_th - T_in) + Hvap_theo)
 
-# ============ 2) Calcul aligné sur DWSIM ============
-# DWSIM impose T5 = 329.29 K : on utilise cette température de sortie.
-# Hvap effective = valeur qui reproduit le bilan d'énergie de DWSIM
-# (DWSIM utilise Cp(T) et ΔHvap(T) de son package thermodynamique).
-Q_sens = m_bas * Cp * (T_DWSIM - T_in)
-Hvap_eff = (Q_DWSIM - Q_sens) / m_bas            # kJ/kg
-Q_lat = m_bas * Hvap_eff
-Q_py = Q_sens + Q_lat
+# ============================================================
+# 2. SEPARATION DU DEBIT
+# ============================================================
+
+fraction_1 = 0.40
+fraction_2 = 0.60
+
+m_1 = m_total * fraction_1
+m_2 = m_total * fraction_2
 
 print("=" * 60)
-print(f"Débit courant 3 (bas) : {m_bas*3600:.2f} kg/h")
-print("-" * 60)
-print("A) Calcul théorique (Antoine, Cp et ΔHvap constants)")
-print(f"   T_éb = {Teb_th:.2f} K | Q = {Q_th:.3f} kW")
-print(f"   écart T = {abs(Teb_th-T_DWSIM)/T_DWSIM*100:.2f} % | "
-      f"écart Q = {abs(Q_th-Q_DWSIM)/Q_DWSIM*100:.2f} %")
-print("-" * 60)
-print("B) Calcul aligné DWSIM")
-print(f"   T5 = {T_DWSIM:.2f} K | Q sensible = {Q_sens:.3f} kW | "
-      f"Q latent = {Q_lat:.3f} kW")
-print(f"   ΔHvap effective = {Hvap_eff:.1f} kJ/kg "
-      f"({Hvap_eff*58.08/1000:.2f} kJ/mol)")
-print(f"   Q total = {Q_py:.2f} kW (DWSIM = {Q_DWSIM} kW)")
+print("BILAN MATIERE")
 print("=" * 60)
 
-# ============ 3) Courbe T5 = f(P) : 20 points comme dans DWSIM ============
-P = np.linspace(0.1, 3.0, 20)                    # atm  (≈ 10 à 304 kPa)
-T_flat = np.full_like(P, T_DWSIM)                # réchauffeur à T de sortie fixée
+print(f"Débit total       : {m_total:.2f} kg/h")
+print(f"Débit flux 40 %   : {m_1:.2f} kg/h")
+print(f"Débit flux 60 %   : {m_2:.2f} kg/h")
+
+
+# ============================================================
+# 3. TEMPERATURE D'EBULLITION A 1 atm
+# ============================================================
+
+# Température de saturation de l'acétone à 1 atm
+T_boil_K = PropsSI("T", "P", P_in_Pa, "Q", 0, FLUID)
+T_boil_C = T_boil_K - 273.15
+
+print("\n" + "=" * 60)
+print("TEMPERATURE D'EBULLITION A 1 atm")
+print("=" * 60)
+
+print(f"Pression          : {P_in_atm:.2f} atm")
+print(f"Température       : {T_boil_C:.3f} °C")
+print(f"Température       : {T_boil_K:.3f} K")
+
+
+# ============================================================
+# 4. ENERGIE NECESSAIRE POUR VAPORISER LE FLUX 60 %
+# ============================================================
+
+# Enthalpie du liquide à l'entrée
+h_in = PropsSI("H", "T", T_in_K, "P", P_in_Pa, FLUID)
+
+# Enthalpie de la vapeur saturée à la pression de 1 atm
+h_vapor = PropsSI("H", "P", P_in_Pa, "Q", 1, FLUID)
+
+# Energie spécifique nécessaire
+delta_h = h_vapor - h_in       # J/kg
+
+# Puissance thermique
+# m_2 est en kg/h → conversion en kg/s
+m_2_kg_s = m_2 / 3600
+
+Q_W = m_2_kg_s * delta_h
+Q_kW = Q_W / 1000
+
+# Energie par heure
+Q_kJ_h = Q_kW * 3600
+
+print("\n" + "=" * 60)
+print("VAPORISATION DU FLUX 60 %")
+print("=" * 60)
+
+print(f"Débit à vaporiser : {m_2:.2f} kg/h")
+print(f"Enthalpie liquide : {h_in / 1000:.2f} kJ/kg")
+print(f"Enthalpie vapeur  : {h_vapor / 1000:.2f} kJ/kg")
+print(f"Delta H           : {delta_h / 1000:.2f} kJ/kg")
+
+print(f"\nEnergie nécessaire : {Q_kJ_h:.2f} kJ/h")
+print(f"Puissance thermique: {Q_kW:.4f} kW")
+
+
+# ============================================================
+# 5. VARIATION DE LA TEMPERATURE D'EBULLITION
+#    0.1 atm → 3 atm
+#    25 POINTS
+# ============================================================
+
+P_min_atm = 0.1
+P_max_atm = 3.0
+n_points = 25
+
+pressures_atm = np.linspace(
+    P_min_atm,
+    P_max_atm,
+    n_points
+)
+
+pressures_Pa = pressures_atm * ATM_TO_PA
+
+boiling_temperatures_K = []
+boiling_temperatures_C = []
+
+for P in pressures_Pa:
+
+    # Température de saturation
+    T_sat_K = PropsSI(
+        "T",
+        "P", P,
+        "Q", 0,
+        FLUID
+    )
+
+    boiling_temperatures_K.append(T_sat_K)
+    boiling_temperatures_C.append(T_sat_K - 273.15)
+
+
+# ============================================================
+# 6. TABLEAU DES RESULTATS
+# ============================================================
+
+results = pd.DataFrame({
+    "Point": np.arange(1, n_points + 1),
+    "Pressure (atm)": pressures_atm,
+    "Pressure (Pa)": pressures_Pa,
+    "Boiling Temperature (K)": boiling_temperatures_K,
+    "Boiling Temperature (°C)": boiling_temperatures_C
+})
+
+print("\n" + "=" * 60)
+print("COURBE DE TEMPERATURE D'EBULLITION")
+print("=" * 60)
+
+print(results.to_string(index=False))
+
+
+# ============================================================
+# 7. VERIFICATION DU POINT A 1 atm
+# ============================================================
+
+T_1atm = PropsSI(
+    "T",
+    "P", ATM_TO_PA,
+    "Q", 0,
+    FLUID
+) - 273.15
+
+print("\n" + "=" * 60)
+print("VERIFICATION A 1 atm")
+print("=" * 60)
+
+print(f"T ébullition à 1 atm = {T_1atm:.3f} °C")
+
+
+# ============================================================
+# 8. TRACE DE LA COURBE
+# ============================================================
 
 plt.figure(figsize=(9, 6))
-plt.plot(P * 101.325, T_flat, "bs-", markersize=4, label="Python = DWSIM")
-plt.xlabel("Pression (kPa)")
-plt.ylabel("Température (K)")
-plt.title("Courant 5 : température en fonction de la pression")
-plt.ylim(310, 350)
+
+plt.plot(
+    pressures_atm,
+    boiling_temperatures_C,
+    marker="o"
+)
+
+plt.xlabel("Pression (atm)")
+plt.ylabel("Température d'ébullition (°C)")
+plt.title("Température d'ébullition de l'acétone en fonction de la pression")
+
 plt.grid(True)
-plt.legend()
 plt.tight_layout()
-plt.savefig("comparaison_dwsim.png", dpi=150)
+
 plt.show()
+
+
+# ============================================================
+# 9. SAUVEGARDE DU TABLEAU
+# ============================================================
+
+results.to_csv(
+    "acetone_boiling_curve.csv",
+    index=False
+)
+
+print("\nRésultats sauvegardés dans : acetone_boiling_curve.csv")
